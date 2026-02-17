@@ -1,18 +1,24 @@
 import ShaderBackground from "@/components/ShaderBackground";
 import Clock from "@/components/Clock";
+import IntroAnimation from "@/components/IntroAnimation";
 
 export default function Home() {
   return (
-    <>
+    <IntroAnimation>
       <main className="px-12 py-10 mx-auto h-screen w-full font-inter flex flex-col">
         <section className="">
-          <span className="font-retro uppercase text-white text-4xl tracking-tighter">JM</span>
+          <span className="font-retro uppercase font-bold text-white text-2xl">JM</span>
         </section>
+
+        <section>
+
+        </section>
+
         <div className="flex justify-center items-center mx-auto w-4/5 flex-1">
-        {/* <h1 className="uppercase text-right text-white text-[15vw] font-retro tracking-tight leading-[11vw]">
-          Freelance Creative Developer
-        </h1> */}
-      </div>
+          {/* <h1 className="uppercase text-right text-white text-[15vw] font-retro tracking-tight leading-[11vw]">
+            Freelance Creative Developer
+          </h1> */}
+        </div>
         <section className="flex justify-between items-center text-white/70 text-sm">
           <div className="flex items-center gap-6">
             <Clock />
@@ -35,7 +41,13 @@ export default function Home() {
         </section>
       </main>
 
-      <ShaderBackground />
-    </>
+      <ShaderBackground text={["Creative Developer"]}>
+        <div className="flex items-center justify-center h-full">
+          <h1 className="text-white text-[12vw] font-retro uppercase tracking-tight leading-[0.85]">
+            {/* Freelance<br />Creative<br />Developer */}
+          </h1>
+        </div>
+      </ShaderBackground>
+    </IntroAnimation>
   );
 }
