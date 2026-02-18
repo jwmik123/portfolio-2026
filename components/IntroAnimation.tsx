@@ -25,7 +25,7 @@ export default function IntroAnimation({
       .fromTo(
         containerRef.current,
         { clipPath: "inset(35% 35% 35% 35% round 5px)" },
-        { clipPath: "inset(0% 0% 0% 0% round 0px)", duration: 0.8, delay: 2.5 }
+        { clipPath: "inset(0% 0% 0% 0% round 0px)", duration: 0.8, delay: 1.5 }
       );
   });
 

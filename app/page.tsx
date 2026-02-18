@@ -6,13 +6,18 @@ export default function Home() {
   return (
     <IntroAnimation>
       <main className="px-12 py-10 mx-auto h-screen w-full font-inter flex flex-col">
-        <section className="">
-          <span className="font-retro uppercase font-bold text-white text-2xl">JM</span>
+        <section className="flex justify-between">
+          <span className="font-retro uppercase font-bold text-white/80 text-3xl">JM</span>
+          <nav>
+            <ul className="text-sm text-white flex flex-col gap-2 uppercase text-right">
+              <li>Work</li>
+              <li>About</li>
+              <li>Contact</li>
+            </ul>
+          </nav>
         </section>
 
-        <section>
-
-        </section>
+        
 
         <div className="flex justify-center items-center mx-auto w-4/5 flex-1">
           {/* <h1 className="uppercase text-right text-white text-[15vw] font-retro tracking-tight leading-[11vw]">
@@ -27,7 +32,7 @@ export default function Home() {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-500 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-orange-500" />
               </span>
-              Ready for work from July 2026
+              Ready for work from {new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toLocaleString("en-US", { month: "long", year: "numeric" })}
             </span>
           </div>
           <div className="flex items-center gap-6">
