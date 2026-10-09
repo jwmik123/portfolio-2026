@@ -46,7 +46,12 @@ export async function buildProjectAtlas(
   urls: string[],
   baseWidth = 1600
 ): Promise<ProjectAtlas> {
-  const images = await Promise.all(urls.map(loadImage));
+  // A screenshot that will not load is left out rather than taking the
+  // whole strip — and with the first project, the whole portal — down.
+  const images = (await Promise.allSettled(urls.map(loadImage)))
+    .filter((r) => r.status === "fulfilled")
+    .map((r) => r.value);
+  if (!images.length) throw new Error("No screenshot could be loaded");
 
   // Lay every screenshot out at the same width, stacked with a gap.
   const gap = baseWidth * GAP_RATIO;

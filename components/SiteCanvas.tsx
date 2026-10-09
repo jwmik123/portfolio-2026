@@ -42,6 +42,8 @@ import {
 export interface PortalProject {
   title: string;
   meta?: string;
+  /** the live site, if there is one */
+  url?: string;
   images: string[];
 }
 
@@ -190,9 +192,47 @@ export default function SiteCanvas({
     let cleanup: (() => void) | null = null;
 
     (async () => {
-      const atlases: ProjectAtlas[] = await Promise.all(
-        projects.map((p) => buildProjectAtlas(p.images))
-      );
+      /*
+       * Each atlas is a full strip of screenshots on the GPU, so only the
+       * current project and its two neighbours are kept. Everything else is
+       * built when the visitor gets next to it and dropped once they move on.
+       */
+      const atlases = new Map<number, Promise<ProjectAtlas>>();
+      const loaded = new Map<number, ProjectAtlas>();
+      const wrap = (i: number) => (i + projects.length) % projects.length;
+
+      function atlasFor(i: number) {
+        let pending = atlases.get(i);
+        if (!pending) {
+          pending = buildProjectAtlas(projects[i].images).then((atlas) => {
+            // evicted (or unmounted) while it was still loading
+            if (disposed || atlases.get(i) !== pending) {
+              atlas.texture.dispose();
+            } else {
+              loaded.set(i, atlas);
+            }
+            return atlas;
+          });
+          atlases.set(i, pending);
+        }
+        return pending;
+      }
+
+      function keepAround(center: number) {
+        const keep = new Set([wrap(center - 1), center, wrap(center + 1)]);
+        for (const i of [...atlases.keys()]) {
+          if (keep.has(i)) continue;
+          const atlas = loaded.get(i);
+          // a sheet that is still on screen holds on to its texture
+          if (atlas && panels.some((panel) => panel.atlas === atlas)) continue;
+          atlases.delete(i);
+          loaded.delete(i);
+          atlas?.texture.dispose();
+        }
+        for (const i of keep) atlasFor(i).catch(() => {});
+      }
+
+      const first = await atlasFor(0);
       if (disposed) return;
 
       // The background has always rendered at CSS resolution. Going to the
@@ -200,7 +240,7 @@ export default function SiteCanvas({
       // lens, which is what made the pointer trail stutter.
       const dpr = 1;
 
-      const imageAspect = atlases[0].imageAspect;
+      const imageAspect = first.imageAspect;
       /**
        * Half-width of a screenshot, in rim radii. A rectangle of half-width f
        * and half-height f * imageAspect has its corners at f * hypot(1,
@@ -370,7 +410,7 @@ export default function SiteCanvas({
       );
 
       const panels: Panel[] = [0, 1].map((i) => {
-        const pu = createPanelUniforms(atlases[0].texture);
+        const pu = createPanelUniforms(first.texture);
         pu.extent.value = PANEL_EXTENT;
         pu.frame.value = shotHalf;
 
@@ -386,7 +426,7 @@ export default function SiteCanvas({
         mesh.renderOrder = i;
         mesh.visible = i === 0;
         projectScene.add(mesh);
-        return { mesh, material, U: pu, atlas: atlases[0] };
+        return { mesh, material, U: pu, atlas: first };
       });
       let active = 0;
 
@@ -443,7 +483,8 @@ export default function SiteCanvas({
 
       measure();
       applyGeometry();
-      panels[0].U.vCenter.value = atlases[0].centers[0];
+      panels[0].U.vCenter.value = first.centers[0];
+      keepAround(0);
 
       /* ---- the hero type --------------------------------------------- */
 
@@ -1027,9 +1068,11 @@ export default function SiteCanvas({
       /* ---- timelines ---------------------------------------------------- */
 
       let timeline: gsap.core.Timeline | null = null;
+      /** a switch waiting for its project's screenshots to arrive */
+      let loading = false;
 
       const control: Controller = {
-        isBusy: () => !!timeline && timeline.isActive(),
+        isBusy: () => loading || (!!timeline && timeline.isActive()),
 
         open() {
           timeline?.kill();
@@ -1104,13 +1147,30 @@ export default function SiteCanvas({
         },
 
         switchTo(next: number, dir: 1 | -1) {
+          const ready = loaded.get(next);
+          if (!ready) {
+            // Neighbours are prefetched, so this only waits when the visitor
+            // outruns the network. The switch plays once the strip is in.
+            loading = true;
+            atlasFor(next)
+              .then(() => {
+                loading = false;
+                if (!disposed) control.switchTo(next, dir);
+              })
+              .catch(() => {
+                loading = false;
+              });
+            return;
+          }
+
           const from = panels[active];
           const to = panels[1 - active];
 
-          to.atlas = atlases[next];
-          to.U.map.value = atlases[next].texture;
+          to.atlas = ready;
+          to.U.map.value = ready.texture;
           fitPanel(to);
-          to.U.vCenter.value = atlases[next].centers[0];
+          to.U.vCenter.value = ready.centers[0];
+          keepAround(next);
           to.U.opacity.value = 0;
           to.U.phase.value = 0;
           to.U.flap.value = 0;
@@ -1186,7 +1246,7 @@ export default function SiteCanvas({
           foldTarget.dispose();
           projectTarget.dispose();
           textTexture.dispose();
-          for (const atlas of atlases) atlas.texture.dispose();
+          for (const atlas of loaded.values()) atlas.texture.dispose();
           renderer.dispose();
           canvas.remove();
         },
@@ -1292,6 +1352,20 @@ export default function SiteCanvas({
               {project?.title}
             </p>
             {project?.meta && <p className="text-white/70">{project.meta}</p>}
+            {project?.url && (
+              <a
+                href={project.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-white/90 underline underline-offset-4 decoration-white/30 transition-opacity hover:opacity-60"
+                style={{
+                  pointerEvents: open ? "auto" : "none",
+                  alignSelf: sides ? "flex-start" : "center",
+                }}
+              >
+                Visit site ↗
+              </a>
+            )}
           </div>
 
           <div

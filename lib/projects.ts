@@ -7,14 +7,20 @@ import { urlFor } from "@/sanity/lib/image";
 const PROJECTS_QUERY = defineQuery(`*[_type == "project" && defined(cover)] | order(order asc) {
   title,
   year,
+  url,
   services,
   "images": [cover, ...content[_type == "projectGallery"].images[]]
 }`);
 
 export const PROJECTS_TAG = "project";
 
-/** Screenshots per project. Each project becomes one atlas texture, so more costs GPU memory. */
-const MAX_IMAGES = 4;
+/**
+ * Screenshots per project. Each project becomes one atlas texture; only the
+ * current project and its neighbours are on the GPU at once (see SiteCanvas).
+ * Six at 1600×1000 is about 8200 px with padding, so the atlas scales them
+ * down by about 1% to fit its 8192 px.
+ */
+const MAX_IMAGES = 6;
 /** Every screenshot is cropped to one aspect so the strip reads as a single column. */
 const WIDTH = 1600;
 const HEIGHT = 1000;
@@ -22,6 +28,7 @@ const HEIGHT = 1000;
 interface SanityProject {
   title: string;
   year?: string;
+  url?: string;
   services?: string[];
   images: { asset?: { _ref: string } }[];
 }
@@ -62,6 +69,7 @@ export async function getProjects(): Promise<PortalProject[]> {
       meta: [...(doc.services ?? []).slice(0, 2), doc.year]
         .filter(Boolean)
         .join(" · "),
+      url: doc.url,
       images: refs.map((ref) =>
         urlFor(ref).width(WIDTH).height(HEIGHT).fit("crop").auto("format").url()
       ),
