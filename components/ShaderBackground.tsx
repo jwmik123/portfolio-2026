@@ -28,6 +28,12 @@ function hexToRgb(hex: string): [number, number, number] {
   return [r, g, b];
 }
 
+// Hero type fills the page width between these gutters (matches main's px-12).
+const GUTTER = 48;
+const LETTER_SPACING = -0.025; // em
+const REF_SIZE = 100;
+const TEXT_OPACITY = 0.6;
+
 interface CharData {
   char: string;
   x: number;
@@ -82,10 +88,20 @@ export default function ShaderBackground({ text, children }: { text?: string[]; 
     });
 
     // --- Text canvas setup ---
+    // Only the text canvas is drawn at device pixel ratio: the hero type is
+    // big enough that 1x looks soft on retina, and it costs a texture upload,
+    // not shader work. Layout stays in CSS pixels via the context transform.
     const textCanvas = document.createElement("canvas");
-    textCanvas.width = width;
-    textCanvas.height = height;
     const ctx = textCanvas.getContext("2d")!;
+
+    function sizeTextCanvas() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      textCanvas.width = Math.round(width * dpr);
+      textCanvas.height = Math.round(height * dpr);
+      // Resizing a canvas resets its context state, so the transform goes here.
+      ctx.setTransform(textCanvas.width / width, 0, 0, textCanvas.height / height, 0, 0);
+    }
+    sizeTextCanvas();
 
     const textTexture = new THREE.CanvasTexture(textCanvas);
     textTexture.minFilter = THREE.LinearFilter;
@@ -134,8 +150,29 @@ export default function ShaderBackground({ text, children }: { text?: string[]; 
     function layoutText(fontFamily: string) {
       chars.length = 0;
 
-      const fontSize = Math.min(width * 0.135, 300);
-      const letterSpacing = -0.025 * fontSize;
+      // Measure each line's ink (not advance) width at a reference size.
+      // Spacing is proportional to font size, so width scales linearly and
+      // one division gives the size that fills the page between the gutters.
+      const lines = text!.map((line) => line.toUpperCase().split(""));
+      ctx.font = `${REF_SIZE}px ${fontFamily}`;
+      const inks = lines.map((lineChars) => {
+        let x = 0;
+        let left = 0;
+        let right = 0;
+        lineChars.forEach((ch, i) => {
+          const m = ctx.measureText(ch);
+          if (i === 0) left = x - m.actualBoundingBoxLeft;
+          if (i === lineChars.length - 1) right = x + m.actualBoundingBoxRight;
+          x += m.width + LETTER_SPACING * REF_SIZE;
+        });
+        return { left, width: right - left };
+      });
+
+      const available = width - GUTTER * 2;
+      const widest = Math.max(...inks.map((ink) => ink.width));
+      const fontSize = REF_SIZE * (available / widest);
+      const scale = fontSize / REF_SIZE;
+      const letterSpacing = LETTER_SPACING * fontSize;
       const lineHeight = fontSize * 0.7;
       fontStr = `${fontSize}px ${fontFamily}`;
 
@@ -143,17 +180,9 @@ export default function ShaderBackground({ text, children }: { text?: string[]; 
       const totalTextHeight = text!.length * lineHeight;
       const startY = (height - totalTextHeight) - totalTextHeight;
 
-      text!.forEach((line, lineIndex) => {
-        const upper = line.toUpperCase();
-        const lineChars = upper.split("");
-
-        let lineWidth = 0;
-        lineChars.forEach((ch, i) => {
-          lineWidth += ctx.measureText(ch).width;
-          if (i < lineChars.length - 1) lineWidth += letterSpacing;
-        });
-
-        let currentX = (width - lineWidth) / 2;
+      lines.forEach((lineChars, lineIndex) => {
+        const ink = inks[lineIndex];
+        let currentX = GUTTER + (available - ink.width * scale) / 2 - ink.left * scale;
         const y = startY + lineIndex * lineHeight;
 
         lineChars.forEach((ch) => {
@@ -176,7 +205,7 @@ export default function ShaderBackground({ text, children }: { text?: string[]; 
         layoutText(fontFamily);
 
         gsap.to(chars, {
-          opacity: .6,
+          opacity: TEXT_OPACITY,
           yOffset: 0,
           duration: 2.5,
           stagger: 0.1,
@@ -189,7 +218,7 @@ export default function ShaderBackground({ text, children }: { text?: string[]; 
     }
 
     function drawText() {
-      ctx.clearRect(0, 0, textCanvas.width, textCanvas.height);
+      ctx.clearRect(0, 0, width, height);
       if (!textReady) return;
 
       ctx.font = fontStr;
@@ -296,12 +325,11 @@ export default function ShaderBackground({ text, children }: { text?: string[]; 
       fluidTarget2.setSize(width, height);
       frameCount = 0;
 
-      textCanvas.width = width;
-      textCanvas.height = height;
+      sizeTextCanvas();
       if (textReady) {
         layoutText(resolveFont());
         chars.forEach((c) => {
-          c.opacity = 1;
+          c.opacity = TEXT_OPACITY;
           c.yOffset = 0;
         });
       }
