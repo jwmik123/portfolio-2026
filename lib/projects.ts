@@ -11,6 +11,8 @@ const PROJECTS_QUERY = defineQuery(`*[_type == "project" && defined(cover)] | or
   "images": [cover, ...content[_type == "projectGallery"].images[]]
 }`);
 
+export const PROJECTS_TAG = "project";
+
 /** Screenshots per project. Each project becomes one atlas texture, so more costs GPU memory. */
 const MAX_IMAGES = 4;
 /** Every screenshot is cropped to one aspect so the strip reads as a single column. */
@@ -35,11 +37,16 @@ function isLandscape(ref: string) {
  * they would be cropped to nothing in a landscape strip.
  */
 export async function getProjects(): Promise<PortalProject[]> {
-  const docs = await client.fetch<SanityProject[]>(
-    PROJECTS_QUERY,
-    {},
-    { next: { revalidate: 3600 } }
-  );
+  // Publishing in Studio fires a webhook that expires this tag (see
+  // app/api/revalidate), so the hour is only a fallback. Skip the API CDN: a
+  // refetch straight after a publish could otherwise still get the old set.
+  const docs = await client
+    .withConfig({ useCdn: false })
+    .fetch<SanityProject[]>(
+      PROJECTS_QUERY,
+      {},
+      { next: { revalidate: 3600, tags: [PROJECTS_TAG] } }
+    );
 
   return docs.map((doc) => {
     const refs = [
