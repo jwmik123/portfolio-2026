@@ -16,6 +16,8 @@ export interface ProjectAtlas {
   widthV: number;
   /** strip v at the centre of each screenshot, in order */
   centers: number[];
+  /** one screenshot's height / width */
+  imageAspect: number;
   count: number;
 }
 
@@ -96,6 +98,7 @@ export async function buildProjectAtlas(
     texture,
     widthV: canvas.width / canvas.height,
     centers,
+    imageAspect: (heights[0] * scale) / width,
     count: images.length,
   };
 }

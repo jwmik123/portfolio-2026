@@ -1,38 +1,63 @@
+import { defineQuery } from "next-sanity";
+
 import type { PortalProject } from "@/components/SiteCanvas";
+import { client } from "@/sanity/lib/client";
+import { urlFor } from "@/sanity/lib/image";
+
+const PROJECTS_QUERY = defineQuery(`*[_type == "project" && defined(cover)] | order(order asc) {
+  title,
+  year,
+  services,
+  "images": [cover, ...content[_type == "projectGallery"].images[]]
+}`);
+
+/** Screenshots per project. Each project becomes one atlas texture, so more costs GPU memory. */
+const MAX_IMAGES = 4;
+/** Every screenshot is cropped to one aspect so the strip reads as a single column. */
+const WIDTH = 1600;
+const HEIGHT = 1000;
+
+interface SanityProject {
+  title: string;
+  year?: string;
+  services?: string[];
+  images: { asset?: { _ref: string } }[];
+}
+
+/** Asset refs carry their size: image-<hash>-<w>x<h>-<ext>. */
+function isLandscape(ref: string) {
+  const m = ref.match(/-(\d+)x(\d+)-/);
+  return !!m && Number(m[1]) > Number(m[2]);
+}
 
 /**
- * Module-level constant on purpose: WorkPortal bakes every project's
- * screenshots into a GPU texture when this array's identity changes.
+ * The work projects, mapped for the portal. Phone screenshots are left out:
+ * they would be cropped to nothing in a landscape strip.
  */
-export const projects: PortalProject[] = [
-  {
-    title: "Aurora",
-    meta: "Brand · Webdesign · 2025",
-    images: [
-      "/projects/aurora-1.svg",
-      "/projects/aurora-2.svg",
-      "/projects/aurora-3.svg",
-      "/projects/aurora-4.svg",
-    ],
-  },
-  {
-    title: "Monolith",
-    meta: "Art direction · Next.js · 2025",
-    images: [
-      "/projects/monolith-1.svg",
-      "/projects/monolith-2.svg",
-      "/projects/monolith-3.svg",
-      "/projects/monolith-4.svg",
-    ],
-  },
-  {
-    title: "Kinetic",
-    meta: "WebGL · Motion · 2026",
-    images: [
-      "/projects/kinetic-1.svg",
-      "/projects/kinetic-2.svg",
-      "/projects/kinetic-3.svg",
-      "/projects/kinetic-4.svg",
-    ],
-  },
-];
+export async function getProjects(): Promise<PortalProject[]> {
+  const docs = await client.fetch<SanityProject[]>(
+    PROJECTS_QUERY,
+    {},
+    { next: { revalidate: 3600 } }
+  );
+
+  return docs.map((doc) => {
+    const refs = [
+      ...new Set(
+        doc.images
+          .map((img) => img.asset?._ref)
+          .filter((ref): ref is string => !!ref && isLandscape(ref))
+      ),
+    ].slice(0, MAX_IMAGES);
+
+    return {
+      title: doc.title,
+      meta: [...(doc.services ?? []).slice(0, 2), doc.year]
+        .filter(Boolean)
+        .join(" · "),
+      images: refs.map((ref) =>
+        urlFor(ref).width(WIDTH).height(HEIGHT).fit("crop").auto("format").url()
+      ),
+    };
+  });
+}

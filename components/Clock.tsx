@@ -146,7 +146,7 @@ export default function Clock() {
 
   return (
     <span
-      className="font-bold select-none"
+      className="select-none tabular-nums text-white/80"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       style={{ display: "inline-flex" }}

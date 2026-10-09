@@ -9,8 +9,7 @@ import {
   type ReactNode,
 } from "react";
 
-import SiteCanvas from "@/components/SiteCanvas";
-import { projects } from "@/lib/projects";
+import SiteCanvas, { type PortalProject } from "@/components/SiteCanvas";
 
 interface WorkPortalApi {
   isOpen: boolean;
@@ -37,9 +36,12 @@ export function useWorkPortal() {
  */
 export default function WorkPortalProvider({
   children,
+  projects,
   text,
 }: {
   children: ReactNode;
+  /** stable identity: WorkPortal rebakes every atlas when this changes */
+  projects: PortalProject[];
   text?: string[];
 }) {
   const [isOpen, setOpen] = useState(false);

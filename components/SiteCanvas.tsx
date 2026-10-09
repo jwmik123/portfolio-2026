@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import gsap from "gsap";
+import Lenis from "lenis";
 import {
   CanvasTexture,
   DoubleSide,
@@ -43,27 +44,30 @@ export interface PortalProject {
   images: string[];
 }
 
-/** dome radius as a fraction of the viewport height — nearly edge to edge. */
-const RIM = 0.47;
+/** rim radius as a fraction of the viewport height. */
+const RIM = 0.37;
 /** never wider than this fraction of the viewport width. */
 const RIM_MAX_W = 0.94;
-/**
- * Half-width of a screenshot, in rim radii. The middle of the lens is now the
- * identity rather than a magnifier, so this is the project's true scale —
- * under 1 to pull back and show more of each page at once.
- */
-const FRAME = 0.84;
-/** The project stays visible out through the curved band, so the sheet has to
- *  carry geometry past the rim. */
-const PANEL_EXTENT = 1.45;
+const PANEL_EXTENT = 1.0;
 /** where the sheet is cut off, in rim radii */
-const THROAT = 1.3;
+const THROAT = 1.0;
+/** how much of that circle the screenshot is allowed to fill */
+const FIT = 0.96;
 
 const FOV = 35;
 const CAM_Z = 5;
 
 const OPEN_D = 1.5;
+/** the project's own entrance, which runs after the hole has opened */
+const SHEET_D = 1.0;
 const SWITCH_D = 1.15;
+/** how much of the sheet's exit plays before the hole starts to close */
+const CLOSE_OVERLAP = 0.55;
+
+/** rim radii of scroll per frame that drives the ripple to full */
+const RIPPLE_FULL = 0.07;
+/** ripple phase per rim radius scrolled */
+const RIPPLE_SCRUB = 2.5;
 
 /**
  * Resting refraction. What matters is bulge / band: at 0.53 the strongest
@@ -72,6 +76,8 @@ const SWITCH_D = 1.15;
  */
 const BULGE_REST = 0.2;
 const BAND_REST = 0.38;
+/** how far apart the channels are bent — the width of the prism fringe */
+const DISP_REST = 0.12;
 
 /** TSL uniform nodes carry a plain `.value`; GSAP only needs that much. */
 type NumUniform = { value: number };
@@ -119,6 +125,8 @@ export default function SiteCanvas({
     onCloseRef.current = onClose;
   }, [onClose]);
 
+  /** rim radius and viewport width in px, to keep the chrome outside the glass */
+  const [frame, setFrame] = useState({ rim: 0, w: 0 });
   const [ready, setReady] = useState(false);
   const [index, setIndex] = useState(0);
 
@@ -140,6 +148,15 @@ export default function SiteCanvas({
       // device ratio quadrupled the cost of the pattern pass *and* of the
       // lens, which is what made the pointer trail stutter.
       const dpr = 1;
+
+      const imageAspect = atlases[0].imageAspect;
+      /**
+       * Half-width of a screenshot, in rim radii. A rectangle of half-width f
+       * and half-height f * imageAspect has its corners at f * hypot(1,
+       * imageAspect), and the throat is a circle — so this is the largest the
+       * project can be before the circle starts biting its corners off.
+       */
+      const shotHalf = (FIT * THROAT) / Math.hypot(1, imageAspect);
       let cssW = window.innerWidth;
       let cssH = window.innerHeight;
 
@@ -249,7 +266,7 @@ export default function SiteCanvas({
       const panels: Panel[] = [0, 1].map((i) => {
         const pu = createPanelUniforms(atlases[0].texture);
         pu.extent.value = PANEL_EXTENT;
-        pu.frame.value = FRAME;
+        pu.frame.value = shotHalf;
 
         const material = new MeshBasicNodeMaterial({
           transparent: true,
@@ -291,11 +308,12 @@ export default function SiteCanvas({
         layout.panelWorld = PANEL_EXTENT * 2 * layout.rimPx * pxToWorld;
         layout.throatWorld = THROAT * layout.rimPx * pxToWorld;
 
+        setFrame({ rim: layout.rimPx, w: cssW });
       }
 
       /** Ties the strip's u and v to one scale: v travelled per rim radius. */
       function fitPanel(panel: Panel) {
-        panel.U.vScale.value = panel.atlas.widthV / (2 * FRAME);
+        panel.U.vScale.value = panel.atlas.widthV / (2 * shotHalf);
       }
 
       function halfViewV() {
@@ -472,43 +490,115 @@ export default function SiteCanvas({
           velocity = delta;
           setScroll(panels[active].U.vCenter.value + delta);
         } else if (portalU.radius.value > 1e-3) {
-          canvas.style.cursor = insideRim(e.clientX, e.clientY) ? "grab" : "";
+          document.body.style.cursor = insideRim(e.clientX, e.clientY)
+            ? "grab"
+            : "";
         }
       };
 
+      /**
+       * The canvas is the page's background and sits at -z-10, so the site's
+       * own markup is on top of it and pointer events never reach it. These
+       * listeners therefore live on the document, and skip anything that came
+       * from a real control.
+       */
+      const fromChrome = (e: Event) =>
+        !!(e.target as HTMLElement | null)?.closest?.(
+          "button, a, [data-portal-ui]"
+        );
+
       const onPointerDown = (e: PointerEvent) => {
-        if (portalU.radius.value < 1e-3) return;
+        if (portalU.radius.value < 1e-3 || fromChrome(e)) return;
         if (!insideRim(e.clientX, e.clientY)) {
           onCloseRef.current();
           return;
         }
         dragging = true;
+        // the hand takes the sheet: drop whatever the wheel was still easing
+        lenis.stop();
         pointerId = e.pointerId;
         lastY = e.clientY;
         moved = 0;
         velocity = 0;
-        canvas.setPointerCapture(e.pointerId);
-        canvas.style.cursor = "grabbing";
+        document.body.style.cursor = "grabbing";
       };
 
       const endDrag = (e: PointerEvent) => {
         if (!dragging || e.pointerId !== pointerId) return;
         dragging = false;
+        if (portalU.radius.value > 1e-3) lenis.start();
         pointerId = -1;
         if (moved < 3) velocity = 0;
-        canvas.releasePointerCapture(e.pointerId);
-        canvas.style.cursor = "grab";
+        document.body.style.cursor = "grab";
       };
 
-      const onWheel = (e: WheelEvent) => {
-        if (portalU.radius.value < 1e-3) return;
-        if (!insideRim(e.clientX, e.clientY)) return;
-        e.preventDefault();
+      /**
+       * Wheel and trackpad go through Lenis. It scrolls a hidden element whose
+       * height is the strip's scroll range, and that scroll position is mapped
+       * back onto vCenter: Lenis owns the smoothing, the strip just follows.
+       * Dragging stays our own, because it has to grab the sheet, not a page.
+       */
+      const scroller = document.createElement("div");
+      scroller.setAttribute("aria-hidden", "true");
+      scroller.style.cssText =
+        "position:fixed;top:0;left:0;width:1px;height:100px;overflow:hidden;visibility:hidden;pointer-events:none;";
+      const scrollContent = document.createElement("div");
+      scroller.appendChild(scrollContent);
+      host.appendChild(scroller);
+
+      /** strip v per scrolled pixel, at the rim's on-screen size */
+      const vPerPx = () => panels[active].U.vScale.value / layout.rimPx;
+      const toPx = (v: number) => (1 - halfViewV() - v) / vPerPx();
+
+      const lenis = new Lenis({
+        wrapper: scroller,
+        content: scrollContent,
+        eventsTarget: window,
+        autoResize: false,
+        lerp: 0.085,
+        prevent: (node) => node.matches("button, a, [data-portal-ui]"),
+        virtualScroll: ({ event }) =>
+          event.type === "wheel" &&
+          portalU.radius.value > 1e-3 &&
+          insideRim(
+            (event as WheelEvent).clientX,
+            (event as WheelEvent).clientY
+          ),
+      });
+      lenis.stop();
+
+      lenis.on("scroll", () => {
+        // Only while Lenis is easing a wheel. Our own syncs and the native
+        // scroll events behind them must not write back, or they would clamp
+        // the rubber-band at the ends of the strip.
+        if (lenis.isScrolling !== "smooth") return;
         velocity = 0;
-        const delta =
-          (-e.deltaY / layout.rimPx) * panels[active].U.vScale.value;
-        setScroll(panels[active].U.vCenter.value + delta);
-      };
+        setScroll(1 - halfViewV() - lenis.animatedScroll * vPerPx());
+      });
+
+      let rangePx = -1;
+
+      /** Keep Lenis's range and position in step with the strip. */
+      function stepLenis(time: number) {
+        const half = halfViewV();
+        const range = Math.max(0, Math.round((1 - 2 * half) / vPerPx()));
+        if (range !== rangePx) {
+          rangePx = range;
+          scrollContent.style.height = `${100 + range}px`;
+          lenis.resize();
+        }
+
+        lenis.raf(time);
+
+        // Anything else that moved the strip — a drag, a switch, opening —
+        // leaves Lenis behind; pull it along so the next wheel starts here.
+        if (!lenis.isScrolling) {
+          const px = Math.min(Math.max(toPx(panels[active].U.vCenter.value), 0), range);
+          if (Math.abs(px - lenis.animatedScroll) > 0.5) {
+            lenis.scrollTo(px, { immediate: true, force: true });
+          }
+        }
+      }
 
       const onPointerLeave = () => {
         fluidU.pointerActive.value = 0;
@@ -516,10 +606,9 @@ export default function SiteCanvas({
 
       document.addEventListener("pointermove", onPointerMove);
       document.addEventListener("pointerleave", onPointerLeave);
-      canvas.addEventListener("pointerdown", onPointerDown);
-      canvas.addEventListener("pointerup", endDrag);
-      canvas.addEventListener("pointercancel", endDrag);
-      canvas.addEventListener("wheel", onWheel, { passive: false });
+      document.addEventListener("pointerdown", onPointerDown);
+      document.addEventListener("pointerup", endDrag);
+      document.addEventListener("pointercancel", endDrag);
 
       function stepSlider() {
         if (dragging) return;
@@ -533,27 +622,46 @@ export default function SiteCanvas({
           velocity *= 0.92;
         }
 
+        // A project is a long page, so this scrolls freely and only
+        // rubber-bands at the two ends. Snapping to whole screenshots meant a
+        // drag had to cross half a screenshot — about 470px — before it stuck,
+        // and anything shorter sprang back, which read as not scrolling at all.
         if (pu.vCenter.value < lo || pu.vCenter.value > hi) {
           const target = pu.vCenter.value < lo ? lo : hi;
           pu.vCenter.value += (target - pu.vCenter.value) * 0.18;
           velocity = 0;
-          return;
         }
+      }
 
-        // once the throw has died down, settle on a whole screenshot
-        if (Math.abs(velocity) < 2.5e-4) {
-          const centers = panels[active].atlas.centers;
-          let nearest = centers[0];
-          for (const c of centers) {
-            if (Math.abs(c - pu.vCenter.value) < Math.abs(nearest - pu.vCenter.value)) {
-              nearest = c;
-            }
-          }
-          const gap = nearest - pu.vCenter.value;
-          if (Math.abs(gap) > 1e-5) {
-            pu.vCenter.value += gap * 0.1;
-            velocity = 0;
-          }
+      /**
+       * The strip ripples like cloth being dragged. The wave's phase is pushed
+       * by the distance scrolled, so it is scrubbed by the hand rather than
+       * running on a clock; once the strip stops it rings out and settles.
+       */
+      let lastV = panels[active].U.vCenter.value;
+      let lastActive = active;
+
+      function stepRipple() {
+        const pu = panels[active].U;
+        if (lastActive !== active) {
+          lastActive = active;
+          lastV = pu.vCenter.value;
+        }
+        const d = (pu.vCenter.value - lastV) / pu.vScale.value;
+        lastV = pu.vCenter.value;
+
+        const target = Math.min(Math.abs(d) / RIPPLE_FULL, 1);
+        // quick to catch, slow to let go: cloth keeps moving after the hand
+        const k = target > pu.ripple.value ? 0.2 : 0.045;
+        pu.ripple.value += (target - pu.ripple.value) * k;
+        if (Math.abs(d) > 1e-5) {
+          pu.rippleDir.value += (Math.sign(d) - pu.rippleDir.value) * 0.12;
+        }
+        pu.ripplePhase.value +=
+          Math.abs(d) * RIPPLE_SCRUB + pu.ripple.value * 0.035;
+
+        for (const panel of panels) {
+          if (panel !== panels[active]) panel.U.ripple.value *= 0.9;
         }
       }
 
@@ -576,6 +684,11 @@ export default function SiteCanvas({
 
         textCanvas.width = cssW;
         textCanvas.height = cssH;
+        // WebGPU allocates a texture once, at its first upload, and only ever
+        // copies into it after that. A canvas of a new size would be written
+        // into the old allocation and the type comes out garbled, so drop it
+        // and let the next upload allocate one that fits.
+        textTexture.dispose();
         textDirty = true;
         if (textReady) {
           layoutText(resolveFont());
@@ -599,7 +712,7 @@ export default function SiteCanvas({
 
       let seeded = false;
 
-      function frame() {
+      function frame(time: number) {
         if (performance.now() - lastMove > 100) {
           fluidU.pointerActive.value = 0;
         }
@@ -641,6 +754,8 @@ export default function SiteCanvas({
         renderer.render(quadScene, quadCamera);
 
         stepSlider();
+        stepLenis(time);
+        stepRipple();
         renderer.setRenderTarget(projectTarget);
         renderer.render(projectScene, projectCamera);
 
@@ -660,7 +775,22 @@ export default function SiteCanvas({
         open() {
           timeline?.kill();
           velocity = 0;
-          panels[active].U.vCenter.value = panels[active].atlas.centers[0];
+          lenis.start();
+
+          // The project arrives the same way it does on a switch: as a sheet
+          // flapping in, timed to the hole opening around it.
+          const sheet = panels[active];
+          const travel = layout.panelWorld * 0.95;
+          panels[1 - active].mesh.visible = false;
+          sheet.mesh.visible = true;
+          sheet.U.vCenter.value = sheet.atlas.centers[0];
+          sheet.U.dir.value = 1;
+          sheet.U.phase.value = 0;
+          sheet.U.flap.value = 0;
+          sheet.U.opacity.value = 0;
+          sheet.U.shiftX.value = travel;
+          sheet.U.ripple.value = 0;
+          sheet.U.rippleDir.value = 0;
 
           // Clear the project target once, so the first lensed frame cannot
           // pick up whatever was left in it from the previous opening.
@@ -675,16 +805,43 @@ export default function SiteCanvas({
             // the glass starts far too strong and relaxes into shape; bulge
             // and band move together so their ratio never reaches the fold
             .fromTo(num(portalU.bulge), { value: 0.46 }, { value: BULGE_REST, duration: 1.9, ease: "power2.out" }, 0)
-            .fromTo(num(portalU.band), { value: 0.9 }, { value: BAND_REST, duration: 1.9, ease: "power2.out" }, 0);
+            .fromTo(num(portalU.band), { value: 0.9 }, { value: BAND_REST, duration: 1.9, ease: "power2.out" }, 0)
+            .fromTo(num(portalU.disp), { value: 0.4 }, { value: DISP_REST, duration: 1.9, ease: "power2.out" }, 0)
+            // ...and only once the hole has finished opening does the sheet
+            // fly in, so the two reads as two beats rather than one muddle
+            .to(num(sheet.U.phase), { value: 1, duration: SHEET_D, ease: "none" }, OPEN_D)
+            .to(num(sheet.U.flap), { value: 1, duration: SHEET_D * 0.38, ease: "sine.out" }, OPEN_D)
+            .to(num(sheet.U.flap), { value: 0, duration: SHEET_D * 0.62, ease: "sine.in" }, OPEN_D + SHEET_D * 0.38)
+            .to(num(sheet.U.shiftX), { value: 0, duration: SHEET_D, ease: "power2.out" }, OPEN_D)
+            .to(num(sheet.U.opacity), { value: 1, duration: SHEET_D * 0.45, ease: "power1.out" }, OPEN_D);
         },
 
         close() {
           timeline?.kill();
+          velocity = 0;
+          lenis.stop();
+
+          // The entrance played backwards: the sheet flaps out of the throat
+          // first, and the hole only swallows itself once it is nearly gone.
+          const sheet = panels[active];
+          const travel = layout.panelWorld * 0.95;
+          sheet.U.dir.value = 1;
+          sheet.U.phase.value = 0;
+          sheet.U.flap.value = 0;
+
+          const shut = SHEET_D * CLOSE_OVERLAP;
           timeline = gsap
             .timeline()
-            .to(num(portalU.bulge), { value: 0.46, duration: 0.8, ease: "power2.in" }, 0)
-            .to(num(portalU.band), { value: 0.9, duration: 0.8, ease: "power2.in" }, 0)
-            .to(num(portalU.radius), { value: 0, duration: 0.9, ease: "expo.in" }, 0.12);
+            .to(num(sheet.U.phase), { value: 1, duration: SHEET_D, ease: "none" }, 0)
+            .to(num(sheet.U.flap), { value: 1, duration: SHEET_D * 0.38, ease: "sine.out" }, 0)
+            .to(num(sheet.U.flap), { value: 0, duration: SHEET_D * 0.62, ease: "sine.in" }, SHEET_D * 0.38)
+            .to(num(sheet.U.shiftX), { value: -travel, duration: SHEET_D, ease: "power2.in" }, 0)
+            .to(num(sheet.U.opacity), { value: 0, duration: SHEET_D * 0.45, ease: "power1.in" }, SHEET_D * 0.55)
+            .to(num(sheet.U.ripple), { value: 0, duration: SHEET_D * 0.4, ease: "power1.out" }, 0)
+            .to(num(portalU.bulge), { value: 0.46, duration: 0.8, ease: "power2.in" }, shut)
+            .to(num(portalU.band), { value: 0.9, duration: 0.8, ease: "power2.in" }, shut)
+            .to(num(portalU.disp), { value: 0.4, duration: 0.8, ease: "power2.in" }, shut)
+            .to(num(portalU.radius), { value: 0, duration: 0.9, ease: "expo.in" }, shut + 0.12);
         },
 
         switchTo(next: number, dir: 1 | -1) {
@@ -699,6 +856,8 @@ export default function SiteCanvas({
           to.U.phase.value = 0;
           to.U.flap.value = 0;
           to.U.dir.value = dir;
+          to.U.ripple.value = 0;
+          to.U.rippleDir.value = 0;
           from.U.dir.value = dir;
           from.U.phase.value = 0;
           from.U.flap.value = 0;
@@ -746,10 +905,12 @@ export default function SiteCanvas({
           window.removeEventListener("resize", onResize);
           document.removeEventListener("pointermove", onPointerMove);
           document.removeEventListener("pointerleave", onPointerLeave);
-          canvas.removeEventListener("pointerdown", onPointerDown);
-          canvas.removeEventListener("pointerup", endDrag);
-          canvas.removeEventListener("pointercancel", endDrag);
-          canvas.removeEventListener("wheel", onWheel);
+          document.removeEventListener("pointerdown", onPointerDown);
+          document.removeEventListener("pointerup", endDrag);
+          document.removeEventListener("pointercancel", endDrag);
+          lenis.destroy();
+          scroller.remove();
+          document.body.style.cursor = "";
 
           for (const panel of panels) {
             panel.mesh.geometry.dispose();
@@ -797,17 +958,17 @@ export default function SiteCanvas({
     else ctrl.close();
   }, [open, ready]);
 
+  // switchTo is a side effect, so it must not run inside a state updater:
+  // React may call those twice, and a second switch reuses the outgoing sheet.
   const step = useCallback(
     (dir: 1 | -1) => {
       const ctrl = ctrlRef.current;
       if (!ctrl || ctrl.isBusy() || projects.length < 2) return;
-      setIndex((current) => {
-        const next = (current + dir + projects.length) % projects.length;
-        ctrl.switchTo(next, dir);
-        return next;
-      });
+      const next = (index + dir + projects.length) % projects.length;
+      ctrl.switchTo(next, dir);
+      setIndex(next);
     },
-    [projects.length]
+    [index, projects.length]
   );
 
   useEffect(() => {
@@ -823,101 +984,90 @@ export default function SiteCanvas({
 
   const project = projects[index];
 
+  /**
+   * Room between the page's margin and the glass. The lens bends the page out
+   * to about 0.4 rim radii past the rim, so the type keeps clear of that too.
+   */
+  const gutter = frame.w / 2 - frame.rim * 1.4 - 48;
+  const sides = gutter >= 160;
+
   return (
     <>
       <div ref={hostRef} className="fixed inset-0 -z-10" />
 
+      {/*
+        The chrome sits beside the hole, never over the work: on a wide screen
+        it takes the two gutters either side of the glass, and when those are
+        too narrow it drops underneath. It is typeset like the rest of the
+        page — the same small caps and the retro face of the monogram.
+      */}
       <div
-        // The dome reaches nearly to the top and bottom edges, so there is no
-        // room under it: the controls live at the foot of the screen instead.
-        className="fixed bottom-24 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-4 transition-opacity duration-700"
+        data-portal-ui
+        className="fixed inset-x-0 top-1/2 z-20 transition-opacity duration-700 text-white uppercase text-sm"
         style={{
           opacity: open ? 1 : 0,
-          pointerEvents: open ? "auto" : "none",
-          // the project behind these can be white or near-black, so the
-          // controls carry their own contrast rather than relying on it
-          filter: "drop-shadow(0 2px 16px rgba(0,0,0,0.75))",
+          pointerEvents: "none",
+          ...(sides
+            ? { transform: "translateY(-50%)" }
+            : { marginTop: frame.rim + 28 }),
         }}
       >
-        <div className="flex items-center gap-8">
-          <PortalArrow
-            direction="left"
-            onClick={() => step(-1)}
-            disabled={projects.length < 2}
-          />
-          <div className="text-center min-w-48">
-            <p className="font-retro uppercase text-white text-xl tracking-wide leading-none">
+        <div
+          className={
+            sides
+              ? "flex items-center justify-between"
+              : "flex flex-col items-center gap-5 text-center"
+          }
+          style={sides ? { paddingInline: 48 } : undefined}
+        >
+          <div
+            className={sides ? "flex flex-col gap-3" : "flex flex-col gap-2 items-center"}
+            style={sides ? { width: gutter } : undefined}
+          >
+            <span className="text-white/50 tabular-nums">
+              {pad(index + 1)} / {pad(projects.length)}
+            </span>
+            <p className="font-retro font-bold text-3xl leading-none text-white/90">
               {project?.title}
             </p>
-            {project?.meta && (
-              <p className="text-white/70 text-xs uppercase tracking-[0.2em] mt-2">
-                {project.meta}
-              </p>
-            )}
+            {project?.meta && <p className="text-white/70">{project.meta}</p>}
           </div>
-          <PortalArrow
-            direction="right"
-            onClick={() => step(1)}
-            disabled={projects.length < 2}
-          />
-        </div>
 
-        <div className="flex items-center gap-2">
-          {projects.map((p, i) => (
-            <span
-              key={p.title}
-              className="h-[2px] rounded-full transition-all duration-500"
-              style={{
-                width: i === index ? 28 : 10,
-                background:
-                  i === index
-                    ? "rgba(255,255,255,0.9)"
-                    : "rgba(255,255,255,0.25)",
-              }}
-            />
-          ))}
+          <div
+            className={
+              sides
+                ? "flex flex-col gap-3 items-end text-right"
+                : "flex flex-col gap-2 items-center"
+            }
+            style={sides ? { width: gutter } : undefined}
+          >
+            <div
+              className="flex gap-6"
+              style={{ pointerEvents: open ? "auto" : "none" }}
+            >
+              <button
+                type="button"
+                onClick={() => step(-1)}
+                disabled={projects.length < 2}
+                className="uppercase transition-opacity hover:opacity-60 disabled:opacity-30"
+              >
+                Prev
+              </button>
+              <button
+                type="button"
+                onClick={() => step(1)}
+                disabled={projects.length < 2}
+                className="uppercase transition-opacity hover:opacity-60 disabled:opacity-30"
+              >
+                Next
+              </button>
+            </div>
+            <span className="text-white/50">Drag to scroll · Esc to close</span>
+          </div>
         </div>
-
-        <p className="text-white/55 text-[11px] uppercase tracking-[0.2em]">
-          Drag to scroll · Esc to close
-        </p>
       </div>
     </>
   );
 }
 
-function PortalArrow({
-  direction,
-  onClick,
-  disabled,
-}: {
-  direction: "left" | "right";
-  onClick: () => void;
-  disabled?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-label={direction === "left" ? "Previous project" : "Next project"}
-      className="grid place-items-center h-12 w-12 rounded-full border border-white/30 bg-black/25 text-white/90 transition-all duration-300 hover:border-white/80 hover:bg-black/40 hover:text-white hover:scale-110 disabled:opacity-20 disabled:hover:scale-100"
-    >
-      <svg
-        width="15"
-        height="15"
-        viewBox="0 0 15 15"
-        fill="none"
-        style={{ transform: direction === "left" ? "scaleX(-1)" : undefined }}
-      >
-        <path
-          d="M2 7.5h10.5M8.5 3.5l4 4-4 4"
-          stroke="currentColor"
-          strokeWidth="1.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    </button>
-  );
-}
+const pad = (n: number) => String(n).padStart(2, "0");
