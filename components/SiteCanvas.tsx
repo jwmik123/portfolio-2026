@@ -124,8 +124,12 @@ const DEVELOPED = 6;
 /** seconds after impact at which the chrome is let in */
 const CHROME_AT = 1.8;
 
-// Hero type fills the page width between these gutters (matches main's px-12).
+// Hero type fills the page width between these gutters (matches main's
+// px-5 / md:px-12). On a phone each word gets a line of its own, or the type
+// comes out too small to read as the hero.
 const GUTTER = 48;
+const GUTTER_PHONE = 20;
+const PHONE_W = 768;
 const LETTER_SPACING = -0.025; // em
 const REF_SIZE = 100;
 /**
@@ -508,11 +512,14 @@ export default function SiteCanvas({
       function layoutText(family: string) {
         chars.length = 0;
         if (!text || text.length === 0) return;
+        const phone = cssW < PHONE_W;
+        const source = phone ? text.flatMap((line) => line.split(" ")) : text;
+        const gutter = phone ? GUTTER_PHONE : GUTTER;
 
         // Measure each line's ink (not advance) width at a reference size.
         // Spacing is proportional to font size, so width scales linearly and
         // one division gives the size that fills the page between the gutters.
-        const lines = text.map((line) => line.toUpperCase().split(""));
+        const lines = source.map((line) => line.toUpperCase().split(""));
         ctx.font = `${REF_SIZE}px ${family}`;
         const inks = lines.map((glyphs) => {
           let x = 0;
@@ -527,7 +534,7 @@ export default function SiteCanvas({
           return { left, width: right - left };
         });
 
-        const available = cssW - GUTTER * 2;
+        const available = cssW - gutter * 2;
         const widest = Math.max(...inks.map((ink) => ink.width));
         const fontSize = REF_SIZE * (available / widest);
         const scale = fontSize / REF_SIZE;
@@ -536,12 +543,12 @@ export default function SiteCanvas({
         fontStr = `${fontSize}px ${family}`;
         ctx.font = fontStr;
 
-        const totalHeight = text.length * lineHeight;
+        const totalHeight = source.length * lineHeight;
         const startY = cssH - 2 * totalHeight;
 
         lines.forEach((glyphs, lineIndex) => {
           const ink = inks[lineIndex];
-          let x = GUTTER + (available - ink.width * scale) / 2 - ink.left * scale;
+          let x = gutter + (available - ink.width * scale) / 2 - ink.left * scale;
           const y = startY + lineIndex * lineHeight;
           glyphs.forEach((ch) => {
             chars.push({ char: ch, x, y });
@@ -741,6 +748,13 @@ export default function SiteCanvas({
         );
 
       const onPointerDown = (e: PointerEvent) => {
+        // A finger has no hover: it arrives wherever it lands, so the stroke
+        // starts there instead of streaking over from where the last one left.
+        if (e.pointerType !== "mouse") {
+          pointerX = strokeX = e.clientX * WATER_SCALE;
+          pointerY = strokeY = e.clientY * WATER_SCALE;
+          lastMove = performance.now();
+        }
         if (portalU.radius.value < 1e-3 || fromChrome(e)) return;
         if (!insideRim(e.clientX, e.clientY)) {
           onCloseRef.current();

@@ -13,6 +13,18 @@
   --font-retro: var(--font-retro);
 }
 
+/*
+ * The page never scrolls: it is one screen, and a finger dragged across it
+ * stirs the water instead of moving the page (see components/SiteCanvas.tsx).
+ * Scoped to the home page so the Studio keeps its own scrolling.
+ */
+html:has([data-intro-chrome]),
+html:has([data-intro-chrome]) body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 body {
   background: var(--background);
   color: var(--foreground);

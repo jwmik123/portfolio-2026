@@ -6,6 +6,7 @@ import WorkPortalProvider, {
 import { getProjects } from "@/lib/projects";
 import RollText from "@/components/RollText";
 
+const EMAIL = "joel@mikdevelopment.nl";
 const NAV_LINK = "group flex items-center justify-end gap-3 uppercase outline-none";
 
 /** A small square marker that wakes up on hover, echoing the status dot. */
@@ -27,12 +28,13 @@ export default async function Home() {
   return (
     <WorkPortalProvider projects={projects} text={["Creative Developer"]}>
       <IntroAnimation>
-        <main className="px-12 py-10 mx-auto h-screen w-full font-mono text-[11px] uppercase tracking-[0.15em] flex flex-col">
-          <section className="grid grid-cols-[1fr_auto_1fr] items-center">
-            <span className="font-retro uppercase font-bold text-white/80 text-3xl tracking-normal">
+        <main className="px-5 py-6 md:px-12 md:py-10 mx-auto h-dvh w-full font-mono text-[11px] uppercase tracking-[0.15em] flex flex-col">
+          {/* phones: name and nav on one row, the status pill under them */}
+          <section className="grid grid-cols-[1fr_auto] md:grid-cols-[1fr_auto_1fr] items-center gap-y-4">
+            <span className="font-retro uppercase font-bold text-white/80 text-2xl md:text-3xl tracking-normal">
               Joël Mik
             </span>
-            <span className="justify-self-center flex items-center gap-2 bg-white text-black rounded-full px-3 py-1 tracking-normal">
+            <span className="col-span-2 row-start-2 justify-self-start md:col-span-1 md:row-start-auto md:justify-self-center flex items-center gap-2 bg-white text-black rounded-full px-3 py-1 tracking-normal">
               <span className="relative flex h-1.5 w-1.5">
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-orange-500 opacity-75" />
                 <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-orange-500" />
@@ -49,9 +51,9 @@ export default async function Home() {
                     <NavLabel>My Work</NavLabel>
                   </WorkTrigger>
                 </li>
-                <li>
-                  <a href="mailto:joel@mikdevelopment.nl" className={NAV_LINK}>
-                    <NavLabel>joel@mikdevelopment.nl</NavLabel>
+                <li className="hidden md:block">
+                  <a href={`mailto:${EMAIL}`} className={NAV_LINK}>
+                    <NavLabel>{EMAIL}</NavLabel>
                   </a>
                 </li>
               </ul>
@@ -60,25 +62,34 @@ export default async function Home() {
 
           <div className="flex justify-center items-center mx-auto w-4/5 flex-1" />
 
-          <section className="flex justify-between items-center text-white/60">
-            <Clock />
-            <div className="flex items-center gap-6">
-              <a
-                href="https://www.instagram.com/joelmik_/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group transition-colors hover:text-white"
-              >
-                <RollText>Instagram</RollText>
-              </a>
-              <a
-                href="https://www.linkedin.com/in/jo%C3%ABl-mik/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group transition-colors hover:text-white"
-              >
-                <RollText>LinkedIn</RollText>
-              </a>
+          <section className="flex flex-col gap-3 text-white/60">
+            {/* on a phone the address has no room in the nav, so it lives here */}
+            <a
+              href={`mailto:${EMAIL}`}
+              className="md:hidden self-start text-white"
+            >
+              {EMAIL}
+            </a>
+            <div className="flex justify-between items-center gap-x-6 gap-y-2 flex-wrap">
+              <Clock />
+              <div className="flex items-center gap-6">
+                <a
+                  href="https://www.instagram.com/joelmik_/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group transition-colors hover:text-white"
+                >
+                  <RollText>Instagram</RollText>
+                </a>
+                <a
+                  href="https://www.linkedin.com/in/jo%C3%ABl-mik/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group transition-colors hover:text-white"
+                >
+                  <RollText>LinkedIn</RollText>
+                </a>
+              </div>
             </div>
           </section>
         </main>

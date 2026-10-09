@@ -4,12 +4,30 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 
 import SiteCanvas, { type PortalProject } from "@/components/SiteCanvas";
+import WorkSlides from "@/components/WorkSlides";
+
+/** Below this the work is shown as slides rather than through the portal. */
+const PHONE_QUERY = "(max-width: 767px)";
+
+function subscribePhone(onChange: () => void) {
+  const mq = window.matchMedia(PHONE_QUERY);
+  mq.addEventListener("change", onChange);
+  return () => mq.removeEventListener("change", onChange);
+}
+
+function useIsPhone() {
+  return useSyncExternalStore(
+    subscribePhone,
+    () => window.matchMedia(PHONE_QUERY).matches,
+    () => false
+  );
+}
 
 interface WorkPortalApi {
   isOpen: boolean;
@@ -45,17 +63,11 @@ export default function WorkPortalProvider({
   text?: string[];
 }) {
   const [isOpen, setOpen] = useState(false);
+  const isPhone = useIsPhone();
 
   const openWork = useCallback(() => setOpen(true), []);
   const closeWork = useCallback(() => setOpen(false), []);
   const toggleWork = useCallback(() => setOpen((v) => !v), []);
-
-  useEffect(() => {
-    document.body.style.overflow = isOpen ? "hidden" : "";
-    return () => {
-      document.body.style.overflow = "";
-    };
-  }, [isOpen]);
 
   return (
     <WorkPortalContext.Provider
@@ -64,13 +76,20 @@ export default function WorkPortalProvider({
       <SiteCanvas
         projects={projects}
         text={text}
-        open={isOpen}
+        open={isOpen && !isPhone}
         onClose={closeWork}
       />
 
+      <WorkSlides
+        projects={projects}
+        open={isOpen && isPhone}
+        onClose={closeWork}
+      />
+
+      {/* touch-action: a finger on the page stirs the water, it never scrolls */}
       <div
-        className="transition-opacity duration-700"
-        style={{ opacity: isOpen ? 0.4 : 1 }}
+        className="touch-none transition-opacity duration-700"
+        style={{ opacity: isOpen ? (isPhone ? 0 : 0.4) : 1 }}
       >
         {children}
       </div>
