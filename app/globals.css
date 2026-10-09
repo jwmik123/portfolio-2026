@@ -22,3 +22,49 @@ body {
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--font-retro);
 }
+
+/* ---- the pointer ------------------------------------------------------ */
+/* See components/Cursor.tsx: the motion lives there, only the look is here. */
+
+.site-cursor {
+  display: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  html,
+  html * {
+    cursor: none !important;
+  }
+
+  .site-cursor {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 100;
+    pointer-events: none;
+    box-sizing: border-box;
+    border: 1.5px solid var(--color-orange-500, #ff6900);
+    background-color: var(--color-orange-500, #ff6900);
+    opacity: 0;
+    will-change: transform;
+    transition:
+      opacity 0.2s ease,
+      background-color 0.3s cubic-bezier(0.625, 0.05, 0, 1);
+  }
+
+  .site-cursor[data-visible] {
+    opacity: 1;
+  }
+
+  .site-cursor[data-hollow] {
+    background-color: transparent;
+  }
+}
+
+/* ---- the intro -------------------------------------------------------- */
+/* The chrome waits for the print to develop; see components/IntroAnimation.tsx. */
+
+html:not([data-intro]) [data-intro-chrome] section > * {
+  opacity: 0;
+}

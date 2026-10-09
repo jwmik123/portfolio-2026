@@ -12,10 +12,10 @@ import {
   Mesh,
   MeshBasicNodeMaterial,
   NodeMaterial,
-  OrthographicCamera,
   PerspectiveCamera,
   PlaneGeometry,
   PostProcessing,
+  QuadMesh,
   RenderTarget,
   RGBAFormat,
   Scene,
@@ -24,12 +24,13 @@ import {
 import { texture as textureNode } from "three/tsl";
 
 import { buildProjectAtlas, type ProjectAtlas } from "@/lib/projectAtlas";
+import { createDevelopUniforms, developStepNode } from "@/lib/developNodes";
+import { createWaterUniforms, waterStepNode } from "@/lib/waterNodes";
 import {
-  createFluidUniforms,
-  fluidSeedNode,
-  fluidStepNode,
-} from "@/lib/fluidNodes";
-import { createSiteUniforms, siteBackgroundNode } from "@/lib/siteNodes";
+  createSiteUniforms,
+  foldNode,
+  siteBackgroundNode,
+} from "@/lib/siteNodes";
 import {
   createPanelUniforms,
   createPortalUniforms,
@@ -79,6 +80,58 @@ const BAND_REST = 0.38;
 /** how far apart the channels are bent — the width of the prism fringe */
 const DISP_REST = 0.12;
 
+/**
+ * The water runs at half the screen's resolution: ripples are smooth enough
+ * that nobody can see the difference, and it quarters the cost of every step.
+ */
+const WATER_SCALE = 0.5;
+/** resolution of the cloth's light the print's drape is read from */
+const FOLD_SCALE = 0.25;
+/** wave steps per frame; more makes the ripples travel faster */
+const WATER_STEPS = 3;
+/** simulation px/s at which a moving pointer presses at full strength */
+const PUSH_FULL = 900;
+/** a pointer silent for longer than this has left; don't streak back to it */
+const POINTER_GAP = 150;
+
+/* ---- the intro: one drop into the developing tray ------------------ */
+
+/** seconds of black, still paper before the drop starts to fall */
+const DROP_AT = 0.4;
+/** seconds the drop falls for */
+const FALL = 1.1;
+/**
+ * The fall, in css px: the drop's own radius, how far above the page it
+ * starts, and how far above the page the eye is. Falling away from the eye,
+ * it shrinks from CAMERA / (CAMERA - DROP_HEIGHT) times its size to its size.
+ */
+const DROP_SIZE = 3;
+const DROP_HEIGHT = 1400;
+const CAMERA = 2000;
+/** seconds the drop takes to land; the press rises and falls over them */
+const DROP_LANDING = 0.1;
+/** the drop's footprint, in simulation px */
+const DROP_RADIUS = 14;
+/** how hard it presses per 60Hz frame at the peak of the landing */
+const DROP_FORCE = 0.4;
+/**
+ * Development at which the tray is put away. Density there is 1 - 7e^-6,
+ * within a third of a percent of full, so finishing it outright can't be seen.
+ */
+const DEVELOPED = 6;
+/** seconds after impact at which the chrome is let in */
+const CHROME_AT = 1.8;
+
+// Hero type fills the page width between these gutters (matches main's px-12).
+const GUTTER = 48;
+const LETTER_SPACING = -0.025; // em
+const REF_SIZE = 100;
+/**
+ * The canvas only holds where the type is, so it is drawn fully opaque; how
+ * bright the ink looks is decided by the light in the site pass.
+ */
+const TEXT_OPACITY = 1;
+
 /** TSL uniform nodes carry a plain `.value`; GSAP only needs that much. */
 type NumUniform = { value: number };
 const num = (u: unknown) => u as NumUniform;
@@ -102,8 +155,6 @@ interface CharData {
   char: string;
   x: number;
   y: number;
-  opacity: number;
-  yOffset: number;
 }
 
 export default function SiteCanvas({
@@ -178,17 +229,20 @@ export default function SiteCanvas({
 
       /* ---- shared full-screen quad ---------------------------------- */
 
-      const quadCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-      const quadScene = new Scene();
-      const quadMesh = new Mesh(new PlaneGeometry(2, 2), new NodeMaterial());
-      quadMesh.frustumCulled = false;
-      quadScene.add(quadMesh);
+      /**
+       * three's own quad, not a plane under an ortho camera: its uv runs
+       * y-down, matching how a render target is read back on either backend.
+       * A plane's y-up uv reads every target mirrored under WebGPU, so each
+       * ping-pong step flipped the field and the water showed two of
+       * everything.
+       */
+      const quadMesh = new QuadMesh(new NodeMaterial());
 
       /**
-       * The fluid needs float32. Its pressure gradient is the difference
-       * between neighbouring texels of a value that sits around 0.3, and half
-       * floats only resolve about 5e-4 there — so the difference quantises to
-       * zero and the trail advances in visible steps instead of flowing.
+       * The water needs float32. A ripple far from where it started is a
+       * height of a few thousandths riding on its neighbours, and the wave
+       * step takes differences of those; half floats round them away and the
+       * surface goes dead in patches before it has calmed down.
        * WebGPU can only filter float32 with the `float32-filterable` feature;
        * WebGL2 does it through OES_texture_float_linear, which is universal.
        */
@@ -197,7 +251,7 @@ export default function SiteCanvas({
         backend.isWebGLBackend === true ||
         renderer.hasFeature("float32-filterable");
 
-      const fluidOptions = {
+      const waterOptions = {
         type: filterableFloat ? FloatType : HalfFloatType,
         format: RGBAFormat,
         minFilter: LinearFilter,
@@ -214,36 +268,88 @@ export default function SiteCanvas({
         depthBuffer: false,
       };
 
-      /* ---- pass 1: the fluid ---------------------------------------- */
+      /* ---- pass 1: the water ---------------------------------------- */
 
-      let fluidA = new RenderTarget(cssW, cssH, fluidOptions);
-      let fluidB = new RenderTarget(cssW, cssH, fluidOptions);
+      const waterW = () => Math.max(1, Math.round(cssW * WATER_SCALE));
+      const waterH = () => Math.max(1, Math.round(cssH * WATER_SCALE));
+      let waterA = new RenderTarget(waterW(), waterH(), waterOptions);
+      let waterB = new RenderTarget(waterW(), waterH(), waterOptions);
 
-      const fluidU = createFluidUniforms(fluidB.texture);
-      fluidU.resolution.value.set(cssW, cssH);
+      const waterU = createWaterUniforms(waterB.texture);
+      waterU.resolution.value.set(waterW(), waterH());
 
-      const fluidMaterial = new NodeMaterial();
+      const waterMaterial = new NodeMaterial();
       // fragmentNode, not colorNode: the colorNode path clamps its output to
-      // >= 0, which would throw away every leftward and downward velocity.
-      fluidMaterial.fragmentNode = fluidStepNode(fluidU);
-      const seedMaterial = new NodeMaterial();
-      seedMaterial.fragmentNode = fluidSeedNode(fluidU);
+      // >= 0, and half of every ripple is a trough.
+      waterMaterial.fragmentNode = waterStepNode(waterU);
+
+      /** Still water: both heights zero in both targets. */
+      function calmWater() {
+        for (const target of [waterA, waterB]) {
+          renderer.setRenderTarget(target);
+          renderer.clear();
+        }
+        renderer.setRenderTarget(null);
+      }
+
+      /* ---- pass 1b: the print developing ---------------------------- */
+
+      // It lives on the water's grid and needs the same precision: a frame's
+      // development is a few hundredths on top of a total of several units.
+      let developA = new RenderTarget(waterW(), waterH(), waterOptions);
+      let developB = new RenderTarget(waterW(), waterH(), waterOptions);
+      const developU = createDevelopUniforms(developB.texture, waterA.texture);
+      const developMaterial = new NodeMaterial();
+      developMaterial.fragmentNode = developStepNode(developU);
 
       /* ---- pass 2: the site background ------------------------------ */
 
+      // Only the type is drawn at device pixel ratio: it is big enough that 1x
+      // looks soft on retina, and it costs a texture upload, not shader work.
+      // Layout stays in CSS pixels through the context's transform.
       const textCanvas = document.createElement("canvas");
-      textCanvas.width = cssW;
-      textCanvas.height = cssH;
       const ctx = textCanvas.getContext("2d")!;
+
+      function sizeTextCanvas() {
+        const ratio = Math.min(window.devicePixelRatio || 1, 2);
+        textCanvas.width = Math.round(cssW * ratio);
+        textCanvas.height = Math.round(cssH * ratio);
+        // Resizing a canvas resets its context, so the transform goes here.
+        ctx.setTransform(
+          textCanvas.width / cssW,
+          0,
+          0,
+          textCanvas.height / cssH,
+          0,
+          0
+        );
+      }
+      sizeTextCanvas();
+
       const textTexture = new CanvasTexture(textCanvas);
       textTexture.minFilter = LinearFilter;
       textTexture.magFilter = LinearFilter;
+      // the passes address the page y-down, as the canvas is drawn
+      textTexture.flipY = false;
 
-      const siteU = createSiteUniforms(fluidA.texture, textTexture);
+      // The cloth's light at a quarter of the resolution, for the drape only:
+      // it is blurred on purpose, so the pixels it saves cost nothing.
+      const foldW = () => Math.max(1, Math.round(cssW * FOLD_SCALE));
+      const foldH = () => Math.max(1, Math.round(cssH * FOLD_SCALE));
+      const foldTarget = new RenderTarget(foldW(), foldH(), targetOptions);
+
+      const siteU = createSiteUniforms(
+        waterA.texture,
+        textTexture,
+        foldTarget.texture,
+        developB.texture
+      );
       siteU.resolution.value.set(cssW, cssH);
 
       const siteMaterial = new NodeMaterial();
       siteMaterial.colorNode = siteBackgroundNode(siteU);
+      const foldMaterial = new NodeMaterial();
+      foldMaterial.colorNode = foldNode(siteU);
 
       const siteTarget = new RenderTarget(
         Math.round(cssW * dpr),
@@ -343,8 +449,7 @@ export default function SiteCanvas({
 
       const chars: CharData[] = [];
       let textReady = false;
-      let textAnimating = false;
-      /** one more upload is owed, after a resize or the last tween frame */
+      /** one more upload is owed, after the font loads or a resize */
       let textDirty = true;
       let fontStr = "";
 
@@ -363,8 +468,29 @@ export default function SiteCanvas({
         chars.length = 0;
         if (!text || text.length === 0) return;
 
-        const fontSize = Math.min(cssW * 0.135, 300);
-        const letterSpacing = -0.025 * fontSize;
+        // Measure each line's ink (not advance) width at a reference size.
+        // Spacing is proportional to font size, so width scales linearly and
+        // one division gives the size that fills the page between the gutters.
+        const lines = text.map((line) => line.toUpperCase().split(""));
+        ctx.font = `${REF_SIZE}px ${family}`;
+        const inks = lines.map((glyphs) => {
+          let x = 0;
+          let left = 0;
+          let right = 0;
+          glyphs.forEach((ch, i) => {
+            const m = ctx.measureText(ch);
+            if (i === 0) left = x - m.actualBoundingBoxLeft;
+            if (i === glyphs.length - 1) right = x + m.actualBoundingBoxRight;
+            x += m.width + LETTER_SPACING * REF_SIZE;
+          });
+          return { left, width: right - left };
+        });
+
+        const available = cssW - GUTTER * 2;
+        const widest = Math.max(...inks.map((ink) => ink.width));
+        const fontSize = REF_SIZE * (available / widest);
+        const scale = fontSize / REF_SIZE;
+        const letterSpacing = LETTER_SPACING * fontSize;
         const lineHeight = fontSize * 0.7;
         fontStr = `${fontSize}px ${family}`;
         ctx.font = fontStr;
@@ -372,18 +498,12 @@ export default function SiteCanvas({
         const totalHeight = text.length * lineHeight;
         const startY = cssH - 2 * totalHeight;
 
-        text.forEach((line, lineIndex) => {
-          const glyphs = line.toUpperCase().split("");
-          let lineWidth = 0;
-          glyphs.forEach((ch, i) => {
-            lineWidth += ctx.measureText(ch).width;
-            if (i < glyphs.length - 1) lineWidth += letterSpacing;
-          });
-
-          let x = (cssW - lineWidth) / 2;
+        lines.forEach((glyphs, lineIndex) => {
+          const ink = inks[lineIndex];
+          let x = GUTTER + (available - ink.width * scale) / 2 - ink.left * scale;
           const y = startY + lineIndex * lineHeight;
           glyphs.forEach((ch) => {
-            chars.push({ char: ch, x, y, opacity: 0, yOffset: 80 });
+            chars.push({ char: ch, x, y });
             x += ctx.measureText(ch).width + letterSpacing;
           });
         });
@@ -393,30 +513,21 @@ export default function SiteCanvas({
         document.fonts.ready.then(() => {
           if (disposed) return;
           layoutText(resolveFont());
-          textAnimating = true;
-          gsap.to(chars, {
-            opacity: 0.6,
-            yOffset: 0,
-            duration: 2.5,
-            stagger: 0.1,
-            ease: "power3.out",
-            delay: 0.5,
-            onComplete: () => {
-              textAnimating = false;
-              textDirty = true;
-            },
-          });
           textReady = true;
+          textDirty = true;
+          startIntro();
         });
+      } else {
+        startIntro();
       }
 
       function drawText() {
         // Re-uploading a full-screen canvas every frame costs megabytes of
-        // texture traffic and stalls the pipeline. The type only changes while
-        // it is animating in, so after that we upload nothing.
-        if (!textAnimating && !textDirty) return;
+        // texture traffic and stalls the pipeline. The type only changes when
+        // it is laid out, so after that we upload nothing.
+        if (!textDirty) return;
 
-        ctx.clearRect(0, 0, textCanvas.width, textCanvas.height);
+        ctx.clearRect(0, 0, cssW, cssH);
         if (!textReady) {
           textTexture.needsUpdate = true;
           textDirty = false;
@@ -425,23 +536,97 @@ export default function SiteCanvas({
         ctx.font = fontStr;
         ctx.textBaseline = "top";
         ctx.fillStyle = "#ffffff";
-        for (const c of chars) {
-          if (c.opacity <= 0) continue;
-          ctx.globalAlpha = c.opacity;
-          ctx.fillText(c.char, c.x, c.y + c.yOffset);
-        }
+        ctx.globalAlpha = TEXT_OPACITY;
+        for (const c of chars) ctx.fillText(c.char, c.x, c.y);
         ctx.globalAlpha = 1;
         textTexture.needsUpdate = true;
-        if (!textAnimating) textDirty = false;
+        textDirty = false;
+      }
+
+      /* ---- the intro -------------------------------------------------- */
+
+      /**
+       * The page starts as undeveloped paper under still water. One drop
+       * lands on the type, and its rings are the agitation that brings the
+       * print up: first under the drop, then outwards with every ring, while
+       * the still developer slowly finishes the corners the rings never reach.
+       * The pointer is in the same water, so moving it develops the print too.
+       */
+      const reducedMotion = window.matchMedia(
+        "(prefers-reduced-motion: reduce)"
+      ).matches;
+      let developing = !reducedMotion;
+      /** the type is laid out and the drop has somewhere to land */
+      let introQueued = false;
+      /** animation-loop time the intro started at, once it has */
+      let introStart = -1;
+      let dropX = 0;
+      let dropY = 0;
+      let chromeLetIn = false;
+
+      /** The chrome waits for the print; see components/IntroAnimation.tsx. */
+      function letChromeIn() {
+        if (chromeLetIn) return;
+        chromeLetIn = true;
+        document.documentElement.dataset.intro = "done";
+        window.dispatchEvent(new Event("intro:done"));
+      }
+
+      function finishIntro() {
+        developing = false;
+        siteU.finished.value = 1;
+        siteU.dropRadius.value = 0;
+        waterU.radius.value = waterRadius;
+        letChromeIn();
+      }
+
+      const waterRadius = waterU.radius.value;
+      if (!developing) finishIntro();
+
+      /** Called once the type is laid out, so it is there to develop. */
+      function startIntro() {
+        if (!developing || introQueued) return;
+        introQueued = true;
+        // the drop falls into the middle of the page
+        dropX = (cssW / 2) * WATER_SCALE;
+        dropY = (cssH / 2) * WATER_SCALE;
+      }
+
+      /**
+       * The drop in the air: gravity, so it starts slow and lands fast, and
+       * perspective, so it shrinks as it leaves the eye. In the landing it
+       * sinks into the surface it presses.
+       */
+      function stepDrop(sinceIntro: number, impact: number) {
+        siteU.dropCenter.value.set(cssW / 2, cssH / 2);
+        const t = (sinceIntro - DROP_AT) / FALL;
+        if (t < 0) {
+          siteU.dropRadius.value = 0;
+        } else if (t < 1) {
+          const height = DROP_HEIGHT * (1 - t * t);
+          const scale = CAMERA / (CAMERA - height);
+          siteU.dropRadius.value = DROP_SIZE * scale;
+        } else {
+          const sunk = (sinceIntro - impact) / DROP_LANDING;
+          siteU.dropRadius.value = sunk < 1 ? DROP_SIZE * (1 - sunk) : 0;
+        }
       }
 
       /* ---- pointer ---------------------------------------------------- */
 
+      /**
+       * Where the pointer is now, and where the water last saw it, both in
+       * simulation pixels with y down, like the screen. Events only move the
+       * first; the frame loop hands the water the segment between the two and catches the
+       * second up, so the water is fed once per frame however often the
+       * browser happens to fire pointermove.
+       */
       let pointerX = 0;
       let pointerY = 0;
-      let prevPointerX = 0;
-      let prevPointerY = 0;
-      let lastMove = 0;
+      let strokeX = 0;
+      let strokeY = 0;
+      let lastMove = -Infinity;
+      let lastFrame = 0;
 
       let dragging = false;
       let pointerId = -1;
@@ -456,6 +641,13 @@ export default function SiteCanvas({
         return Math.hypot(px, py) / r < 1;
       }
 
+      /** The pointer's look over the portal; components/Cursor.tsx draws it. */
+      function setCursor(state: "" | "grab" | "grabbing") {
+        const root = document.documentElement;
+        if (state) root.dataset.cursor = state;
+        else delete root.dataset.cursor;
+      }
+
       function setScroll(value: number) {
         const half = halfViewV();
         const lo = half;
@@ -467,18 +659,16 @@ export default function SiteCanvas({
       }
 
       const onPointerMove = (e: PointerEvent) => {
-        prevPointerX = pointerX;
-        prevPointerY = pointerY;
-        pointerX = e.clientX;
-        pointerY = cssH - e.clientY;
-        lastMove = performance.now();
-        fluidU.pointer.value.set(
-          pointerX,
-          pointerY,
-          prevPointerX,
-          prevPointerY
-        );
-        fluidU.pointerActive.value = 1;
+        const now = performance.now();
+        pointerX = e.clientX * WATER_SCALE;
+        pointerY = e.clientY * WATER_SCALE;
+        // Back from outside the window, or after a long rest: start the stroke
+        // here rather than dragging a wake across from where it was last seen.
+        if (now - lastMove > POINTER_GAP) {
+          strokeX = pointerX;
+          strokeY = pointerY;
+        }
+        lastMove = now;
 
         if (dragging && e.pointerId === pointerId) {
           const dy = e.clientY - lastY;
@@ -489,10 +679,12 @@ export default function SiteCanvas({
             (dy / layout.rimPx) * panels[active].U.vScale.value;
           velocity = delta;
           setScroll(panels[active].U.vCenter.value + delta);
-        } else if (portalU.radius.value > 1e-3) {
-          document.body.style.cursor = insideRim(e.clientX, e.clientY)
-            ? "grab"
-            : "";
+        } else {
+          setCursor(
+            portalU.radius.value > 1e-3 && insideRim(e.clientX, e.clientY)
+              ? "grab"
+              : ""
+          );
         }
       };
 
@@ -520,7 +712,7 @@ export default function SiteCanvas({
         lastY = e.clientY;
         moved = 0;
         velocity = 0;
-        document.body.style.cursor = "grabbing";
+        setCursor("grabbing");
       };
 
       const endDrag = (e: PointerEvent) => {
@@ -529,7 +721,7 @@ export default function SiteCanvas({
         if (portalU.radius.value > 1e-3) lenis.start();
         pointerId = -1;
         if (moved < 3) velocity = 0;
-        document.body.style.cursor = "grab";
+        setCursor("grab");
       };
 
       /**
@@ -600,12 +792,7 @@ export default function SiteCanvas({
         }
       }
 
-      const onPointerLeave = () => {
-        fluidU.pointerActive.value = 0;
-      };
-
       document.addEventListener("pointermove", onPointerMove);
-      document.addEventListener("pointerleave", onPointerLeave);
       document.addEventListener("pointerdown", onPointerDown);
       document.addEventListener("pointerup", endDrag);
       document.addEventListener("pointercancel", endDrag);
@@ -675,32 +862,32 @@ export default function SiteCanvas({
         projectCamera.aspect = cssW / cssH;
         projectCamera.updateProjectionMatrix();
 
-        fluidA.setSize(cssW, cssH);
-        fluidB.setSize(cssW, cssH);
-        fluidU.resolution.value.set(cssW, cssH);
+        waterA.setSize(waterW(), waterH());
+        waterB.setSize(waterW(), waterH());
+        waterU.resolution.value.set(waterW(), waterH());
+        developA.setSize(waterW(), waterH());
+        developB.setSize(waterW(), waterH());
+        // the development doesn't survive the new grid; finish the print
+        if (developing) finishIntro();
         siteU.resolution.value.set(cssW, cssH);
         siteTarget.setSize(Math.round(cssW * dpr), Math.round(cssH * dpr));
+        foldTarget.setSize(foldW(), foldH());
         projectTarget.setSize(Math.round(cssW * dpr), Math.round(cssH * dpr));
 
-        textCanvas.width = cssW;
-        textCanvas.height = cssH;
+        sizeTextCanvas();
         // WebGPU allocates a texture once, at its first upload, and only ever
         // copies into it after that. A canvas of a new size would be written
         // into the old allocation and the type comes out garbled, so drop it
         // and let the next upload allocate one that fits.
         textTexture.dispose();
         textDirty = true;
-        if (textReady) {
-          layoutText(resolveFont());
-          chars.forEach((c) => {
-            c.opacity = 0.6;
-            c.yOffset = 0;
-          });
-        }
+        if (textReady) layoutText(resolveFont());
 
         measure();
         applyGeometry();
-        seeded = false;
+        // the old surface doesn't fit the new grid; let the water settle
+        calm = false;
+        lastMove = -Infinity;
 
         if (portalU.radius.value > 1e-3 && !timeline?.isActive()) {
           portalU.radius.value = layout.rim;
@@ -710,34 +897,106 @@ export default function SiteCanvas({
 
       /* ---- render loop -------------------------------------------------- */
 
-      let seeded = false;
+      let calm = false;
 
       function frame(time: number) {
-        if (performance.now() - lastMove > 100) {
-          fluidU.pointerActive.value = 0;
-        }
-
-        if (!seeded) {
-          quadMesh.material = seedMaterial;
-          for (const target of [fluidA, fluidB]) {
-            renderer.setRenderTarget(target);
-            renderer.render(quadScene, quadCamera);
+        if (!calm) {
+          calmWater();
+          if (developing) {
+            // start from blank paper
+            for (const target of [developA, developB]) {
+              renderer.setRenderTarget(target);
+              renderer.clear();
+            }
+            renderer.setRenderTarget(null);
           }
-          seeded = true;
+          calm = true;
         }
 
-        // fluid: advect the previous frame into the current one
-        fluidU.previous.value = fluidB.texture;
-        quadMesh.material = fluidMaterial;
-        renderer.setRenderTarget(fluidA);
-        renderer.render(quadScene, quadCamera);
-        const swap = fluidA;
-        fluidA = fluidB;
-        fluidB = swap;
+        // The press scales with the pointer's speed and with the frame's
+        // length, so a 120Hz screen puts the same wake into the water as a
+        // 60Hz one. A pointer that hasn't moved travels nothing and presses
+        // nothing.
+        const dt = Math.min((time - lastFrame) / 1000, 0.05);
+        lastFrame = time;
+        const travel = Math.hypot(pointerX - strokeX, pointerY - strokeY);
+        const speed = dt > 0 ? travel / dt : 0;
+        const push = Math.min(speed / PUSH_FULL, 1) * dt * 60;
+        let fromX = strokeX;
+        let fromY = strokeY;
+        strokeX = pointerX;
+        strokeY = pointerY;
+        let toX = pointerX;
+        let toY = pointerY;
+        let press = push;
 
-        // the page itself
+        // The drop lands over a few frames, pressing hardest in the middle of
+        // its landing, so it starts and ends without a jolt of its own.
+        if (introQueued && introStart < 0) introStart = time;
+        const sinceIntro = introStart >= 0 ? (time - introStart) / 1000 : -1;
+        const impact = DROP_AT + FALL;
+        const sinceImpact = sinceIntro - impact;
+        const landing = sinceImpact / DROP_LANDING;
+        if (developing && landing >= 0 && landing < 1) {
+          fromX = toX = dropX;
+          fromY = toY = dropY;
+          press = DROP_FORCE * Math.sin(Math.PI * landing) * dt * 60;
+          waterU.radius.value = DROP_RADIUS;
+        } else {
+          waterU.radius.value = waterRadius;
+        }
+
+        quadMesh.material = waterMaterial;
+        for (let i = 0; i < WATER_STEPS; i++) {
+          // Each step presses only its own share of the frame's path. Pressing
+          // all of it at once and then letting it spread leaves a wake of
+          // evenly spaced ridges, one per frame, which real water never has.
+          const t0 = i / WATER_STEPS;
+          const t1 = (i + 1) / WATER_STEPS;
+          waterU.pointer.value.set(
+            fromX + (toX - fromX) * t1,
+            fromY + (toY - fromY) * t1,
+            fromX + (toX - fromX) * t0,
+            fromY + (toY - fromY) * t0
+          );
+          waterU.push.value = press;
+          waterU.previous.value = waterB.texture;
+          renderer.setRenderTarget(waterA);
+          quadMesh.render(renderer);
+          const swap = waterA;
+          waterA = waterB;
+          waterB = swap;
+        }
+
+        // the print develops under the water as it is now
+        // The developer only reaches the paper once the drop does: until
+        // then the page is black and the falling drop is all there is.
+        if (developing && introStart >= 0) stepDrop(sinceIntro, impact);
+        if (developing && sinceImpact >= 0) {
+          developU.dt.value = dt;
+          developU.water.value = waterB.texture;
+          developU.previous.value = developB.texture;
+          quadMesh.material = developMaterial;
+          renderer.setRenderTarget(developA);
+          quadMesh.render(renderer);
+          const swap = developA;
+          developA = developB;
+          developB = swap;
+          siteU.developed.value = developB.texture;
+
+          if (sinceImpact >= CHROME_AT) letChromeIn();
+          // the still developer alone gets every corner there by now
+          if (sinceImpact >= DEVELOPED / developU.still.value) {
+            finishIntro();
+          }
+        }
+
+        // the page itself, seen through it
         drawText();
-        siteU.fluid.value = fluidB.texture;
+        siteU.water.value = waterB.texture;
+        quadMesh.material = foldMaterial;
+        renderer.setRenderTarget(foldTarget);
+        quadMesh.render(renderer);
         quadMesh.material = siteMaterial;
 
         // With no hole there is nothing to bend, and the lens would just be an
@@ -746,12 +1005,12 @@ export default function SiteCanvas({
         // time, and it costs exactly what it did before the hole existed.
         if (portalU.radius.value <= 1e-3) {
           renderer.setRenderTarget(null);
-          renderer.render(quadScene, quadCamera);
+          quadMesh.render(renderer);
           return;
         }
 
         renderer.setRenderTarget(siteTarget);
-        renderer.render(quadScene, quadCamera);
+        quadMesh.render(renderer);
 
         stepSlider();
         stepLenis(time);
@@ -904,25 +1163,27 @@ export default function SiteCanvas({
           renderer.setAnimationLoop(null);
           window.removeEventListener("resize", onResize);
           document.removeEventListener("pointermove", onPointerMove);
-          document.removeEventListener("pointerleave", onPointerLeave);
           document.removeEventListener("pointerdown", onPointerDown);
           document.removeEventListener("pointerup", endDrag);
           document.removeEventListener("pointercancel", endDrag);
           lenis.destroy();
           scroller.remove();
-          document.body.style.cursor = "";
+          setCursor("");
 
           for (const panel of panels) {
             panel.mesh.geometry.dispose();
             panel.material.dispose();
           }
-          quadMesh.geometry.dispose();
-          fluidMaterial.dispose();
-          seedMaterial.dispose();
+          waterMaterial.dispose();
+          developMaterial.dispose();
+          developA.dispose();
+          developB.dispose();
           siteMaterial.dispose();
-          fluidA.dispose();
-          fluidB.dispose();
+          foldMaterial.dispose();
+          waterA.dispose();
+          waterB.dispose();
           siteTarget.dispose();
+          foldTarget.dispose();
           projectTarget.dispose();
           textTexture.dispose();
           for (const atlas of atlases) atlas.texture.dispose();
@@ -1049,17 +1310,19 @@ export default function SiteCanvas({
                 type="button"
                 onClick={() => step(-1)}
                 disabled={projects.length < 2}
-                className="uppercase transition-opacity hover:opacity-60 disabled:opacity-30"
+                aria-label="Previous project"
+                className="text-xl leading-none transition-opacity hover:opacity-60 disabled:opacity-30"
               >
-                Prev
+                ←
               </button>
               <button
                 type="button"
                 onClick={() => step(1)}
                 disabled={projects.length < 2}
-                className="uppercase transition-opacity hover:opacity-60 disabled:opacity-30"
+                aria-label="Next project"
+                className="text-xl leading-none transition-opacity hover:opacity-60 disabled:opacity-30"
               >
-                Next
+                →
               </button>
             </div>
             <span className="text-white/50">Drag to scroll · Esc to close</span>
